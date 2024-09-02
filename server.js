@@ -7,10 +7,15 @@ const db = require("./db");
 const cors = require("cors");
 
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: "http://localhost:3000", // adjust if your frontend is on a different port
+    credentials: true,
+  })
+);
 app.use(express.json());
 
-const JWT_SECRET = "your_jwt_secret";
+const JWT_SECRET = "my secret";
 
 // User Schema
 const UserSchema = new mongoose.Schema({
@@ -40,12 +45,30 @@ const Transaction = mongoose.model("Transaction", TransactionSchema);
 
 // Middleware to verify JWT
 const verifyToken = (req, res, next) => {
-  const token = req.headers["authorization"];
-  if (!token) return res.status(403).json({ error: "No token provided" });
+  const authHeader = req.headers["authorization"];
+  if (!authHeader) {
+    console.log("No Authorization header provided");
+    return res.status(403).json({ error: "No token provided" });
+  }
+
+  const parts = authHeader.split(" ");
+  if (parts.length !== 2 || parts[0] !== "Bearer") {
+    console.log("Invalid Authorization header format");
+    return res.status(403).json({ error: "Invalid token format" });
+  }
+
+  const token = parts[1];
 
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err)
-      return res.status(500).json({ error: "Failed to authenticate token" });
+    if (err) {
+      console.error("Token verification error:", err);
+      if (err.name === "TokenExpiredError") {
+        return res.status(401).json({ error: "Token expired" });
+      }
+      return res.status(401).json({ error: "Failed to authenticate token" });
+    }
+
+    console.log("Token verified successfully for user:", decoded.id);
     req.userId = decoded.id;
     next();
   });
@@ -81,8 +104,13 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid password" });
 
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
-    res.json({ token, user });
+    console.log("Token generated for user:", user._id);
+    res.json({
+      token,
+      user,
+    });
   } catch (error) {
+    console.error("Login error:", error);
     res.status(500).json({ error: "Error logging in" });
   }
 });
@@ -155,11 +183,16 @@ app.post("/withdraw", verifyToken, async (req, res) => {
   }
 });
 
-// Upload money
+// Example for the /upload route
 app.post("/upload", verifyToken, async (req, res) => {
   try {
     const { amount } = req.body;
     const user = await User.findById(req.userId);
+
+    if (!user) {
+      console.error(`User not found for ID: ${req.userId}`);
+      return res.status(404).json({ error: "User not found" });
+    }
 
     user.balance += amount;
     await user.save();
@@ -172,9 +205,15 @@ app.post("/upload", verifyToken, async (req, res) => {
     });
     await transaction.save();
 
-    res.json({ message: "Money uploaded successfully" });
+    res.json({
+      message: "Money uploaded successfully",
+      newBalance: user.balance,
+    });
   } catch (error) {
-    res.status(500).json({ error: "Error uploading money" });
+    console.error("Error in /upload route:", error);
+    res
+      .status(500)
+      .json({ error: "Error uploading money", details: error.message });
   }
 });
 
@@ -191,5 +230,5 @@ app.get("/transactions", verifyToken, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
