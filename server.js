@@ -1,26 +1,3 @@
-// db.js
-const mongoose = require("mongoose");
-
-const dbURL =
-  "mongodb+srv://roselightservices34:H3chl1oByfD7FFEl@roselight.yl9t6cm.mongodb.net/?retryWrites=true&w=majority&appName=roselight";
-
-mongoose.connect(dbURL, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-
-const db = mongoose.connection;
-
-db.on("error", (error) => {
-  console.error("MongoDB connection error:", error);
-});
-
-db.once("open", () => {
-  console.log("Connected to MongoDB");
-});
-
-module.exports = db;
-
 // server.js
 const express = require("express");
 const jwt = require("jsonwebtoken");
@@ -36,6 +13,8 @@ const JWT_SECRET = "your_jwt_secret";
 // User Schema
 const UserSchema = new mongoose.Schema({
   studentNumber: { type: String, unique: true, required: true },
+  name: { type: String, required: true },
+  surname: { type: String, required: true },
   password: { type: String, required: true },
   balance: { type: Number, default: 0 },
 });
@@ -73,9 +52,14 @@ const verifyToken = (req, res, next) => {
 // Register new user
 app.post("/register", async (req, res) => {
   try {
-    const { studentNumber, password } = req.body;
+    const { name, surname, studentNumber, password } = req.body;
     const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ studentNumber, password: hashedPassword });
+    const user = new User({
+      name,
+      surname,
+      studentNumber,
+      password: hashedPassword,
+    });
     await user.save();
     res.status(201).json({ message: "User registered successfully" });
   } catch (error) {
@@ -95,7 +79,7 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid password" });
 
     const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
-    res.json({ token });
+    res.json({ token, user });
   } catch (error) {
     res.status(500).json({ error: "Error logging in" });
   }
