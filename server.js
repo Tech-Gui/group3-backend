@@ -4,8 +4,10 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
 const db = require("./db");
+const cors = require("cors");
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = "your_jwt_secret";
