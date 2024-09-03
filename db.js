@@ -2,7 +2,6 @@
 const mongoose = require("mongoose");
 
 const dbURL = process.env.MONGO_URI;
-console.log({ dbURL });
 
 mongoose.connect(dbURL, {
   useNewUrlParser: true,

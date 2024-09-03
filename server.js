@@ -245,7 +245,7 @@ app.post("/gen-receive-qr", verifyToken, async (req, res) => {
   }
 });
 
-app.get("/qr/:id", verifyToken, async (req, res) => {
+app.post("/qr/:id", verifyToken, async (req, res) => {
   const transactionId = req.params.id;
   const senderId = req.userId;
 
@@ -271,12 +271,17 @@ app.get("/qr/:id", verifyToken, async (req, res) => {
       return res.status(404).json({ error: "Recipient not found" });
     }
 
-    if (sender.balance < transactionRequest.amount) {
+    const amount = transactionRequest.amount || req.body.amount;
+    if (!amount) {
+      return res.status(400).json({ error: "Amount is required" });
+    }
+
+    if (sender.balance < amount) {
       return res.status(400).json({ error: "Insufficient funds" });
     }
 
-    sender.balance -= transactionRequest.amount;
-    recipient.balance += transactionRequest.amount;
+    sender.balance -= amount;
+    recipient.balance += amount;
 
     await sender.save();
     await recipient.save();
@@ -287,7 +292,7 @@ app.get("/qr/:id", verifyToken, async (req, res) => {
     const transaction = new Transaction({
       from: sender.studentNumber,
       to: recipient.studentNumber,
-      amount: transactionRequest.amount,
+      amount,
       type: "send",
     });
     await transaction.save();
