@@ -6,8 +6,11 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
 const db = require("./db");
+const resend = require("./resend");
 const cors = require("cors");
 const QRCode = require("qrcode");
+const { authenticator } = require('otplib');
+
 
 const app = express();
 app.use(
@@ -31,6 +34,18 @@ const UserSchema = new mongoose.Schema({
 });
 
 const User = mongoose.model("User", UserSchema);
+
+const OtpSchema = new mongoose.Schema({
+  userId: { type: String, required: true },
+  otp: { type: String, required: true },
+  status: {
+    type: String,
+    enum: ["in_progress", "completed", "cancelled", "failed"],
+    required: true,
+  },
+});
+
+const Otp = mongoose.model("Otp", OtpSchema);
 
 // Transaction Schema
 const TransactionSchema = new mongoose.Schema({
@@ -208,6 +223,87 @@ app.post("/send", verifyToken, async (req, res) => {
     res.json({ message: "Money sent successfully" });
   } catch (error) {
     res.status(500).json({ error: "Error sending money" });
+  }
+});
+
+app.post('/send2', verifyToken, async (req, res) => {
+  try {
+    const { toStudentNumber, amount } = req.body;
+    const sender = await User.findById(req.userId);
+    const recipient = await User.findOne({ studentNumber: toStudentNumber });
+
+    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
+
+    // Generate OTP
+    const otp = authenticator.generate(secret);
+    const otpId = crypto.randomBytes(16).toString('hex'); 
+    otpStore[otpId] = { otp, userId: sender._id, toStudentNumber, amount };
+
+    // Send OTP via email
+    const { data, error } = await resend.emails.send({
+      from: 'Acme <onboarding@resend.dev>',
+      to: [sender.email],
+      subject: 'Your OTP Code',
+      html: `<p>Your OTP code for sending money is: <strong>${otp}</strong></p>`,
+    });
+
+    if (error) {
+      return res.status(500).json({ error: 'Error sending OTP email' });
+    }
+
+    res.json({ message: 'OTP sent to your email. Please validate to complete the transaction.', otpId });
+  } catch (error) {
+    console.error('Error sending money:', error);
+    res.status(500).json({ error: 'Error sending money' });
+  }
+});
+
+// Endpoint to validate OTP and complete the transaction
+app.post('/validate-otp', verifyToken, async (req, res) => {
+  try {
+    const { otpId, otp } = req.body;
+
+    // Validate OTP
+    const storedOtpData = otpStore[otpId];
+    if (!storedOtpData) {
+      return res.status(400).json({ error: 'Invalid or expired OTP' });
+    }
+
+    const isValidOtp = authenticator.check(otp, storedOtpData.otp);
+    if (!isValidOtp) {
+      return res.status(400).json({ error: 'Invalid OTP' });
+    }
+
+    const sender = await User.findById(storedOtpData.userId);
+    const recipient = await User.findOne({ studentNumber: storedOtpData.toStudentNumber });
+
+    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
+    if (sender.balance < storedOtpData.amount) return res.status(400).json({ error: 'Insufficient funds' });
+
+    // Complete the transaction
+    sender.balance -= storedOtpData.amount;
+    recipient.balance += storedOtpData.amount;
+
+    await sender.save();
+    await recipient.save();
+
+    const transaction = new Transaction({
+      from: sender.studentNumber,
+      to: recipient.studentNumber,
+      amount: storedOtpData.amount,
+      type: 'send',
+    });
+
+    await transaction.save();
+
+    // Remove the used OTP from store
+    delete otpStore[otpId];
+
+    res.json({ message: 'Transaction completed successfully' });
+  } catch (error) {
+    console.error('Error validating OTP and completing transaction:', error);
+    res.status(500).json({ error: 'Error completing transaction' });
   }
 });
 
