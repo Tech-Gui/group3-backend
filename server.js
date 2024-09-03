@@ -5,6 +5,7 @@ const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
 const db = require("./db");
 const cors = require("cors");
+const QRCode = require("qrcode");
 
 const app = express();
 app.use(
@@ -42,6 +43,27 @@ const TransactionSchema = new mongoose.Schema({
 });
 
 const Transaction = mongoose.model("Transaction", TransactionSchema);
+
+const QrCodeTransactionRequestSchema = new mongoose.Schema({
+  to: { type: String, required: true },
+  amount: { type: Number, required: false },
+  type: {
+    type: String,
+    enum: ["receive"],
+    required: true,
+  },
+  status: {
+    type: String,
+    enum: ["in_progress", "completed", "cancelled", "failed"],
+    required: true,
+  },
+  timestamp: { type: Date, default: Date.now },
+});
+
+const QrCodeTransactionRequest = mongoose.model(
+  "QrCodeTransactionRequest",
+  QrCodeTransactionRequestSchema
+);
 
 // Middleware to verify JWT
 const verifyToken = (req, res, next) => {
@@ -88,6 +110,7 @@ app.post("/register", async (req, res) => {
     await user.save();
     res.status(201).json({ message: "User registered successfully" });
   } catch (error) {
+    console.log({ error });
     res.status(500).json({ error: "Error registering user" });
   }
 });
@@ -154,6 +177,94 @@ app.post("/send", verifyToken, async (req, res) => {
     res.json({ message: "Money sent successfully" });
   } catch (error) {
     res.status(500).json({ error: "Error sending money" });
+  }
+});
+
+app.post("/gen-receive-qr", verifyToken, async (req, res) => {
+  const { toStudentNumber, amount } = req.body;
+
+  const qrCodeSize = 500;
+  try {
+    const qrcodeTransactionRequest = new QrCodeTransactionRequest({
+      to: toStudentNumber,
+      amount,
+      type: "receive",
+      status: "in_progress",
+    });
+    const qrcodeRequest = await qrcodeTransactionRequest.save();
+    console.log("QR code request created:", qrcodeRequest._id);
+    const url = `http://localhost:3001/qr/${qrcodeRequest._id}`;
+
+    const options = {
+      errorCorrectionLevel: "H",
+      width: qrCodeSize,
+      color: {
+        dark: "#000000",
+        light: "#FFFFFF",
+      },
+    };
+    const qrCodeDataURL = await QRCode.toDataURL(url, options);
+    res.status(201).json({
+      data: qrCodeDataURL,
+      message: "QR code generated successfully",
+    });
+  } catch (err) {
+    console.error("Error generating QR code:", err);
+    res.status(500).send("Error generating QR code");
+  }
+});
+
+app.get("/qr/:id", verifyToken, async (req, res) => {
+  const transactionId = req.params.id;
+  const senderId = req.userId;
+
+  try {
+    const transactionRequest = await QrCodeTransactionRequest.findById(
+      transactionId
+    );
+
+    if (!transactionRequest || transactionRequest.status !== "in_progress") {
+      return res
+        .status(404)
+        .json({ error: "Transaction not found or already completed" });
+    }
+
+    console.log({ transactionRequest, senderId });
+
+    const recipient = await User.findOne({
+      studentNumber: transactionRequest.to,
+    });
+    const sender = await User.findById(senderId);
+
+    if (!recipient) {
+      return res.status(404).json({ error: "Recipient not found" });
+    }
+
+    if (sender.balance < transactionRequest.amount) {
+      return res.status(400).json({ error: "Insufficient funds" });
+    }
+
+    sender.balance -= transactionRequest.amount;
+    recipient.balance += transactionRequest.amount;
+
+    await sender.save();
+    await recipient.save();
+
+    transactionRequest.status = "completed";
+    await transactionRequest.save();
+
+    const transaction = new Transaction({
+      from: sender.studentNumber,
+      to: recipient.studentNumber,
+      amount: transactionRequest.amount,
+      type: "send",
+    });
+    await transaction.save();
+
+    res.json({ message: "Transaction completed successfully" });
+  } catch (error) {
+    console.error("Error completing transaction:", error);
+    res.status(500).json({ error: "Error completing transaction" });
   }
 });
 
