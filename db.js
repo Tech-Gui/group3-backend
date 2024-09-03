@@ -1,8 +1,8 @@
 // db.js
 const mongoose = require("mongoose");
 
-const dbURL =
-  "mongodb+srv://roselightservices34:H3chl1oByfD7FFEl@roselight.yl9t6cm.mongodb.net/?retryWrites=true&w=majority&appName=roselight";
+const dbURL = process.env.MONGO_URI;
+console.log({ dbURL });
 
 mongoose.connect(dbURL, {
   useNewUrlParser: true,

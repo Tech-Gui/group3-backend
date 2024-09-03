@@ -1,3 +1,5 @@
+const dotenv = require("dotenv");
+dotenv.config();
 // server.js
 const express = require("express");
 const jwt = require("jsonwebtoken");
@@ -21,6 +23,7 @@ const JWT_SECRET = "my secret";
 // User Schema
 const UserSchema = new mongoose.Schema({
   studentNumber: { type: String, unique: true, required: true },
+  email: { type: String, required: true },
   name: { type: String, required: true },
   surname: { type: String, required: true },
   password: { type: String, required: true },
@@ -99,13 +102,20 @@ const verifyToken = (req, res, next) => {
 // Register new user
 app.post("/register", async (req, res) => {
   try {
-    const { name, surname, studentNumber, password } = req.body;
+    const { name, surname, studentNumber, password, email } = req.body;
+    const existingUser = await User.findOne({
+      $or: [{ studentNumber }, { email: email.toLowerCase() }],
+    });
+    if (existingUser)
+      return res.status(400).json({ error: "User already exists" });
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({
       name,
       surname,
       studentNumber,
       password: hashedPassword,
+      email: email.toLowerCase(),
     });
     await user.save();
     res.status(201).json({ message: "User registered successfully" });
@@ -118,10 +128,31 @@ app.post("/register", async (req, res) => {
 // Login
 app.post("/login", async (req, res) => {
   try {
-    const { studentNumber, password } = req.body;
-    const user = await User.findOne({ studentNumber });
-    if (!user) return res.status(404).json({ error: "User not found" });
+    const { studentNumber, email, password } = req.body;
+    if (!password) {
+      return res.status(400).json({ error: "Password is required" });
+    }
+    if (!studentNumber && !email) {
+      return res
+        .status(400)
+        .json({ error: "Student number or email is required" });
+    }
 
+    if (studentNumber && email) {
+      return res
+        .status(400)
+        .json({ error: "Please provide only student number or email" });
+    }
+
+    if (studentNumber) {
+      user = await User.findOne({ studentNumber }).select("+password");
+    } else {
+      user = await User.findOne({ email: email.toLowerCase() }).select(
+        "+password"
+      );
+    }
+
+    if (!user) return res.status(404).json({ error: "User not found" });
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword)
       return res.status(401).json({ error: "Invalid password" });
@@ -181,12 +212,12 @@ app.post("/send", verifyToken, async (req, res) => {
 });
 
 app.post("/gen-receive-qr", verifyToken, async (req, res) => {
-  const { toStudentNumber, amount } = req.body;
+  const { amount } = req.body;
 
   const qrCodeSize = 500;
   try {
     const qrcodeTransactionRequest = new QrCodeTransactionRequest({
-      to: toStudentNumber,
+      to: req.userId,
       amount,
       type: "receive",
       status: "in_progress",
@@ -232,7 +263,7 @@ app.get("/qr/:id", verifyToken, async (req, res) => {
     console.log({ transactionRequest, senderId });
 
     const recipient = await User.findOne({
-      studentNumber: transactionRequest.to,
+      _id: transactionRequest.to,
     });
     const sender = await User.findById(senderId);
 
