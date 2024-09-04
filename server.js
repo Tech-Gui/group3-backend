@@ -8,12 +8,7 @@ const shortid = require("shortid");
 const db = require("./db");
 
 const app = express();
-app.use(
-  cors({
-    origin: "http://localhost:3000",
-    credentials: true,
-  })
-);
+app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = "my secret";
