@@ -1,7 +1,10 @@
 // db.js
+
 const mongoose = require("mongoose");
 
-const dbURL = process.env.MONGO_URI;
+// Replace '<password>' and '<dbname>' with your actual password and database name
+const dbURL =
+  "mongodb+srv://roselightservices34:H3chl1oByfD7FFEl@roselight.yl9t6cm.mongodb.net/?retryWrites=true&w=majority&appName=roselight";
 
 mongoose.connect(dbURL, {
   useNewUrlParser: true,

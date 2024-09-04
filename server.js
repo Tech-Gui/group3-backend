@@ -1,21 +1,16 @@
-const dotenv = require("dotenv");
-dotenv.config();
-// server.js
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
-const db = require("./db");
-const resend = require("./resend");
 const cors = require("cors");
-const QRCode = require("qrcode");
-const { authenticator } = require('otplib');
-
+const qrcode = require("qrcode");
+const shortid = require("shortid");
+const db = require("./db");
 
 const app = express();
 app.use(
   cors({
-    origin: "http://localhost:3000", // adjust if your frontend is on a different port
+    origin: "http://localhost:3000",
     credentials: true,
   })
 );
@@ -23,10 +18,9 @@ app.use(express.json());
 
 const JWT_SECRET = "my secret";
 
-// User Schema
+// User (Student) Schema
 const UserSchema = new mongoose.Schema({
   studentNumber: { type: String, unique: true, required: true },
-  email: { type: String, required: true },
   name: { type: String, required: true },
   surname: { type: String, required: true },
   password: { type: String, required: true },
@@ -35,17 +29,15 @@ const UserSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", UserSchema);
 
-const OtpSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  otp: { type: String, required: true },
-  status: {
-    type: String,
-    enum: ["in_progress", "completed", "cancelled", "failed"],
-    required: true,
-  },
+// Merchant Schema
+const MerchantSchema = new mongoose.Schema({
+  merchantId: { type: String, unique: true, required: true },
+  name: { type: String, required: true },
+  password: { type: String, required: true },
+  balance: { type: Number, default: 0 },
 });
 
-const Otp = mongoose.model("Otp", OtpSchema);
+const Merchant = mongoose.model("Merchant", MerchantSchema);
 
 // Transaction Schema
 const TransactionSchema = new mongoose.Schema({
@@ -54,7 +46,7 @@ const TransactionSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   type: {
     type: String,
-    enum: ["send", "receive", "withdraw", "upload"],
+    enum: ["send", "receive", "withdraw", "upload", "merchant_payment"],
     required: true,
   },
   timestamp: { type: Date, default: Date.now },
@@ -62,67 +54,59 @@ const TransactionSchema = new mongoose.Schema({
 
 const Transaction = mongoose.model("Transaction", TransactionSchema);
 
-const QrCodeTransactionRequestSchema = new mongoose.Schema({
-  to: { type: String, required: true },
-  amount: { type: Number, required: false },
-  type: {
-    type: String,
-    enum: ["receive"],
-    required: true,
-  },
+// Pending Payment Schema
+const PendingPaymentSchema = new mongoose.Schema({
+  paymentId: { type: String, unique: true, required: true },
+  merchantId: { type: String, required: true },
+  amount: { type: Number, required: true },
   status: {
     type: String,
-    enum: ["in_progress", "completed", "cancelled", "failed"],
-    required: true,
+    enum: ["pending", "completed", "cancelled"],
+    default: "pending",
   },
-  timestamp: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now, expires: "1h" }, // Automatically delete after 1 hour
 });
 
-const QrCodeTransactionRequest = mongoose.model(
-  "QrCodeTransactionRequest",
-  QrCodeTransactionRequestSchema
-);
+const PendingPayment = mongoose.model("PendingPayment", PendingPaymentSchema);
 
 // Middleware to verify JWT
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
-  if (!authHeader) {
-    console.log("No Authorization header provided");
-    return res.status(403).json({ error: "No token provided" });
-  }
+  if (!authHeader) return res.status(403).json({ error: "No token provided" });
 
   const parts = authHeader.split(" ");
   if (parts.length !== 2 || parts[0] !== "Bearer") {
-    console.log("Invalid Authorization header format");
     return res.status(403).json({ error: "Invalid token format" });
   }
 
   const token = parts[1];
 
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) {
-      console.error("Token verification error:", err);
-      if (err.name === "TokenExpiredError") {
-        return res.status(401).json({ error: "Token expired" });
-      }
+    if (err)
       return res.status(401).json({ error: "Failed to authenticate token" });
-    }
-
-    console.log("Token verified successfully for user:", decoded.id);
     req.userId = decoded.id;
+    req.userType = decoded.type;
     next();
   });
 };
 
-// Register new user
+// Student Routes
+
+// Register new student
 app.post("/register", async (req, res) => {
   try {
-    const { name, surname, studentNumber, password, email } = req.body;
-    const existingUser = await User.findOne({
-      $or: [{ studentNumber }, { email: email.toLowerCase() }],
-    });
-    if (existingUser)
-      return res.status(400).json({ error: "User already exists" });
+    const { name, surname, studentNumber, password } = req.body;
+
+    if (!name || !surname || !studentNumber || !password) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    const existingUser = await User.findOne({ studentNumber });
+    if (existingUser) {
+      return res
+        .status(400)
+        .json({ error: "User with this student number already exists" });
+    }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = new User({
@@ -130,12 +114,12 @@ app.post("/register", async (req, res) => {
       surname,
       studentNumber,
       password: hashedPassword,
-      email: email.toLowerCase(),
     });
+
     await user.save();
     res.status(201).json({ message: "User registered successfully" });
   } catch (error) {
-    console.log({ error });
+    console.error("Registration error:", error);
     res.status(500).json({ error: "Error registering user" });
   }
 });
@@ -143,40 +127,24 @@ app.post("/register", async (req, res) => {
 // Login
 app.post("/login", async (req, res) => {
   try {
-    const { studentNumber, email, password } = req.body;
-    if (!password) {
-      return res.status(400).json({ error: "Password is required" });
-    }
-    if (!studentNumber && !email) {
-      return res
-        .status(400)
-        .json({ error: "Student number or email is required" });
-    }
-
-    if (studentNumber && email) {
-      return res
-        .status(400)
-        .json({ error: "Please provide only student number or email" });
-    }
-
-    if (studentNumber) {
-      user = await User.findOne({ studentNumber }).select("+password");
-    } else {
-      user = await User.findOne({ email: email.toLowerCase() }).select(
-        "+password"
-      );
-    }
-
+    const { studentNumber, password } = req.body;
+    const user = await User.findOne({ studentNumber });
     if (!user) return res.status(404).json({ error: "User not found" });
+
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword)
       return res.status(401).json({ error: "Invalid password" });
 
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
-    console.log("Token generated for user:", user._id);
+    const token = jwt.sign({ id: user._id, type: "student" }, JWT_SECRET, {
+      expiresIn: "1h",
+    });
     res.json({
       token,
-      user,
+      user: {
+        studentNumber: user.studentNumber,
+        name: user.name,
+        surname: user.surname,
+      },
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -220,183 +188,18 @@ app.post("/send", verifyToken, async (req, res) => {
     });
     await transaction.save();
 
-    res.json({ message: "Money sent successfully" });
+    res.json({
+      message: "Money sent successfully",
+      transaction: {
+        ...transaction.toObject(),
+        senderName: `${sender.name} ${sender.surname}`,
+        recipientName: `${recipient.name} ${recipient.surname}`,
+        senderBalance: sender.balance,
+        recipientBalance: recipient.balance,
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: "Error sending money" });
-  }
-});
-
-app.post('/send2', verifyToken, async (req, res) => {
-  try {
-    const { toStudentNumber, amount } = req.body;
-    const sender = await User.findById(req.userId);
-    const recipient = await User.findOne({ studentNumber: toStudentNumber });
-
-    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
-    if (sender.balance < amount) return res.status(400).json({ error: 'Insufficient funds' });
-
-    // Generate OTP
-    const otp = authenticator.generate(secret);
-    const otpId = crypto.randomBytes(16).toString('hex'); 
-    otpStore[otpId] = { otp, userId: sender._id, toStudentNumber, amount };
-
-    // Send OTP via email
-    const { data, error } = await resend.emails.send({
-      from: 'Acme <onboarding@resend.dev>',
-      to: [sender.email],
-      subject: 'Your OTP Code',
-      html: `<p>Your OTP code for sending money is: <strong>${otp}</strong></p>`,
-    });
-
-    if (error) {
-      return res.status(500).json({ error: 'Error sending OTP email' });
-    }
-
-    res.json({ message: 'OTP sent to your email. Please validate to complete the transaction.', otpId });
-  } catch (error) {
-    console.error('Error sending money:', error);
-    res.status(500).json({ error: 'Error sending money' });
-  }
-});
-
-// Endpoint to validate OTP and complete the transaction
-app.post('/validate-otp', verifyToken, async (req, res) => {
-  try {
-    const { otpId, otp } = req.body;
-
-    // Validate OTP
-    const storedOtpData = otpStore[otpId];
-    if (!storedOtpData) {
-      return res.status(400).json({ error: 'Invalid or expired OTP' });
-    }
-
-    const isValidOtp = authenticator.check(otp, storedOtpData.otp);
-    if (!isValidOtp) {
-      return res.status(400).json({ error: 'Invalid OTP' });
-    }
-
-    const sender = await User.findById(storedOtpData.userId);
-    const recipient = await User.findOne({ studentNumber: storedOtpData.toStudentNumber });
-
-    if (!recipient) return res.status(404).json({ error: 'Recipient not found' });
-    if (sender.balance < storedOtpData.amount) return res.status(400).json({ error: 'Insufficient funds' });
-
-    // Complete the transaction
-    sender.balance -= storedOtpData.amount;
-    recipient.balance += storedOtpData.amount;
-
-    await sender.save();
-    await recipient.save();
-
-    const transaction = new Transaction({
-      from: sender.studentNumber,
-      to: recipient.studentNumber,
-      amount: storedOtpData.amount,
-      type: 'send',
-    });
-
-    await transaction.save();
-
-    // Remove the used OTP from store
-    delete otpStore[otpId];
-
-    res.json({ message: 'Transaction completed successfully' });
-  } catch (error) {
-    console.error('Error validating OTP and completing transaction:', error);
-    res.status(500).json({ error: 'Error completing transaction' });
-  }
-});
-
-app.post("/gen-receive-qr", verifyToken, async (req, res) => {
-  const { amount } = req.body;
-
-  const qrCodeSize = 500;
-  try {
-    const qrcodeTransactionRequest = new QrCodeTransactionRequest({
-      to: req.userId,
-      amount,
-      type: "receive",
-      status: "in_progress",
-    });
-    const qrcodeRequest = await qrcodeTransactionRequest.save();
-    console.log("QR code request created:", qrcodeRequest._id);
-    const url = `http://localhost:3001/qr/${qrcodeRequest._id}`;
-
-    const options = {
-      errorCorrectionLevel: "H",
-      width: qrCodeSize,
-      color: {
-        dark: "#000000",
-        light: "#FFFFFF",
-      },
-    };
-    const qrCodeDataURL = await QRCode.toDataURL(url, options);
-    res.status(201).json({
-      data: qrCodeDataURL,
-      message: "QR code generated successfully",
-    });
-  } catch (err) {
-    console.error("Error generating QR code:", err);
-    res.status(500).send("Error generating QR code");
-  }
-});
-
-app.post("/qr/:id", verifyToken, async (req, res) => {
-  const transactionId = req.params.id;
-  const senderId = req.userId;
-
-  try {
-    const transactionRequest = await QrCodeTransactionRequest.findById(
-      transactionId
-    );
-
-    if (!transactionRequest || transactionRequest.status !== "in_progress") {
-      return res
-        .status(404)
-        .json({ error: "Transaction not found or already completed" });
-    }
-
-    console.log({ transactionRequest, senderId });
-
-    const recipient = await User.findOne({
-      _id: transactionRequest.to,
-    });
-    const sender = await User.findById(senderId);
-
-    if (!recipient) {
-      return res.status(404).json({ error: "Recipient not found" });
-    }
-
-    const amount = transactionRequest.amount || req.body.amount;
-    if (!amount) {
-      return res.status(400).json({ error: "Amount is required" });
-    }
-
-    if (sender.balance < amount) {
-      return res.status(400).json({ error: "Insufficient funds" });
-    }
-
-    sender.balance -= amount;
-    recipient.balance += amount;
-
-    await sender.save();
-    await recipient.save();
-
-    transactionRequest.status = "completed";
-    await transactionRequest.save();
-
-    const transaction = new Transaction({
-      from: sender.studentNumber,
-      to: recipient.studentNumber,
-      amount,
-      type: "send",
-    });
-    await transaction.save();
-
-    res.json({ message: "Transaction completed successfully" });
-  } catch (error) {
-    console.error("Error completing transaction:", error);
-    res.status(500).json({ error: "Error completing transaction" });
   }
 });
 
@@ -420,22 +223,24 @@ app.post("/withdraw", verifyToken, async (req, res) => {
     });
     await transaction.save();
 
-    res.json({ message: "Money withdrawn successfully" });
+    res.json({
+      message: "Money withdrawn successfully",
+      transaction: {
+        ...transaction.toObject(),
+        userName: `${user.name} ${user.surname}`,
+        balance: user.balance,
+      },
+    });
   } catch (error) {
     res.status(500).json({ error: "Error withdrawing money" });
   }
 });
 
-// Example for the /upload route
+// Upload money
 app.post("/upload", verifyToken, async (req, res) => {
   try {
     const { amount } = req.body;
     const user = await User.findById(req.userId);
-
-    if (!user) {
-      console.error(`User not found for ID: ${req.userId}`);
-      return res.status(404).json({ error: "User not found" });
-    }
 
     user.balance += amount;
     await user.save();
@@ -450,13 +255,15 @@ app.post("/upload", verifyToken, async (req, res) => {
 
     res.json({
       message: "Money uploaded successfully",
-      newBalance: user.balance,
+      transaction: {
+        ...transaction.toObject(),
+        userName: `${user.name} ${user.surname}`,
+        balance: user.balance,
+      },
     });
   } catch (error) {
     console.error("Error in /upload route:", error);
-    res
-      .status(500)
-      .json({ error: "Error uploading money", details: error.message });
+    res.status(500).json({ error: "Error uploading money" });
   }
 });
 
@@ -467,11 +274,254 @@ app.get("/transactions", verifyToken, async (req, res) => {
     const transactions = await Transaction.find({
       $or: [{ from: user.studentNumber }, { to: user.studentNumber }],
     }).sort({ timestamp: -1 });
-    res.json(transactions);
+
+    const enhancedTransactions = await Promise.all(
+      transactions.map(async (transaction) => {
+        const transObj = transaction.toObject();
+        if (transaction.from !== "UPLOAD" && transaction.to !== "WITHDRAW") {
+          const fromUser = await User.findOne({
+            studentNumber: transaction.from,
+          });
+          const toUser = await User.findOne({ studentNumber: transaction.to });
+          transObj.fromName = fromUser
+            ? `${fromUser.name} ${fromUser.surname}`
+            : "Unknown";
+          transObj.toName = toUser
+            ? `${toUser.name} ${toUser.surname}`
+            : "Unknown";
+        }
+        return transObj;
+      })
+    );
+
+    res.json({
+      transactions: enhancedTransactions,
+      currentBalance: user.balance,
+    });
   } catch (error) {
     res.status(500).json({ error: "Error fetching transactions" });
   }
 });
 
+// Merchant Routes
+
+// Register new merchant
+app.post("/register/merchant", async (req, res) => {
+  try {
+    const { name, merchantId, password } = req.body;
+
+    if (!name || !merchantId || !password) {
+      return res.status(400).json({ error: "All fields are required" });
+    }
+
+    const existingMerchant = await Merchant.findOne({ merchantId });
+    if (existingMerchant) {
+      return res
+        .status(400)
+        .json({ error: "Merchant with this ID already exists" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const merchant = new Merchant({
+      name,
+      merchantId,
+      password: hashedPassword,
+    });
+
+    await merchant.save();
+    res.status(201).json({ message: "Merchant registered successfully" });
+  } catch (error) {
+    console.error("Merchant registration error:", error);
+    res.status(500).json({ error: "Error registering merchant" });
+  }
+});
+
+// Merchant login
+app.post("/login/merchant", async (req, res) => {
+  try {
+    const { merchantId, password } = req.body;
+    const merchant = await Merchant.findOne({ merchantId });
+    if (!merchant) return res.status(404).json({ error: "Merchant not found" });
+
+    const validPassword = await bcrypt.compare(password, merchant.password);
+    if (!validPassword)
+      return res.status(401).json({ error: "Invalid password" });
+
+    const token = jwt.sign({ id: merchant._id, type: "merchant" }, JWT_SECRET, {
+      expiresIn: "1h",
+    });
+    res.json({
+      token,
+      merchant: {
+        merchantId: merchant.merchantId,
+        name: merchant.name,
+      },
+    });
+  } catch (error) {
+    console.error("Merchant login error:", error);
+    res.status(500).json({ error: "Error logging in" });
+  }
+});
+
+// Get merchant balance
+app.get("/merchant/balance", verifyToken, async (req, res) => {
+  if (req.userType !== "merchant")
+    return res.status(403).json({ error: "Unauthorized" });
+  try {
+    const merchant = await Merchant.findById(req.userId);
+    res.json({ balance: merchant.balance });
+  } catch (error) {
+    res.status(500).json({ error: "Error fetching merchant balance" });
+  }
+});
+
+// Generate payment link
+app.post("/merchant/generate-payment-link", verifyToken, async (req, res) => {
+  if (req.userType !== "merchant")
+    return res.status(403).json({ error: "Unauthorized" });
+  try {
+    const { amount } = req.body;
+    const merchant = await Merchant.findById(req.userId);
+
+    const paymentId = shortid.generate();
+    const pendingPayment = new PendingPayment({
+      paymentId,
+      merchantId: merchant.merchantId,
+      amount,
+    });
+
+    await pendingPayment.save();
+
+    const paymentLink = `${
+      process.env.FRONTEND_URL || "http://localhost:3000"
+    }/pay/${paymentId}`;
+    const qrCode = await qrcode.toDataURL(paymentLink);
+
+    res.json({ paymentLink, qrCode, paymentId });
+  } catch (error) {
+    console.error("Error generating payment link:", error);
+    res.status(500).json({ error: "Error generating payment link" });
+  }
+});
+
+// Get merchant transactions
+app.get("/merchant/transactions", verifyToken, async (req, res) => {
+  if (req.userType !== "merchant")
+    return res.status(403).json({ error: "Unauthorized" });
+  try {
+    const merchant = await Merchant.findById(req.userId);
+    const transactions = await Transaction.find({
+      to: merchant.merchantId,
+      type: "merchant_payment",
+    }).sort({ timestamp: -1 });
+
+    res.json({ transactions });
+  } catch (error) {
+    console.error("Error fetching merchant transactions:", error);
+    res.status(500).json({ error: "Error fetching transactions" });
+  }
+});
+
+// Get payment details
+app.get("/payment-details/:paymentId", async (req, res) => {
+  try {
+    const pendingPayment = await PendingPayment.findOne({
+      paymentId: req.params.paymentId,
+    });
+    if (!pendingPayment)
+      return res.status(404).json({ error: "Payment not found" });
+
+    const merchant = await Merchant.findOne({
+      merchantId: pendingPayment.merchantId,
+    });
+    if (!merchant) return res.status(404).json({ error: "Merchant not found" });
+
+    res.json({
+      merchantName: merchant.name,
+      amount: pendingPayment.amount,
+      status: pendingPayment.status,
+    });
+  } catch (error) {
+    console.error("Error fetching payment details:", error);
+    res.status(500).json({ error: "Error fetching payment details" });
+  }
+});
+
+// Process payment
+app.post("/process-payment/:paymentId", async (req, res) => {
+  try {
+    const { studentNumber, password } = req.body;
+    const pendingPayment = await PendingPayment.findOne({
+      paymentId: req.params.paymentId,
+    });
+    if (!pendingPayment)
+      return res.status(404).json({ error: "Payment not found" });
+    if (pendingPayment.status !== "pending")
+      return res.status(400).json({ error: "Payment already processed" });
+
+    const student = await User.findOne({ studentNumber });
+    if (!student) return res.status(404).json({ error: "Student not found" });
+
+    const validPassword = await bcrypt.compare(password, student.password);
+    if (!validPassword)
+      return res.status(401).json({ error: "Invalid password" });
+
+    if (student.balance < pendingPayment.amount)
+      return res.status(400).json({ error: "Insufficient funds" });
+
+    const merchant = await Merchant.findOne({
+      merchantId: pendingPayment.merchantId,
+    });
+    if (!merchant) return res.status(404).json({ error: "Merchant not found" });
+
+    student.balance -= pendingPayment.amount;
+    merchant.balance += pendingPayment.amount;
+
+    await student.save();
+    await merchant.save();
+
+    const transaction = new Transaction({
+      from: student.studentNumber,
+      to: merchant.merchantId,
+      amount: pendingPayment.amount,
+      type: "merchant_payment",
+    });
+    await transaction.save();
+
+    pendingPayment.status = "completed";
+    await pendingPayment.save();
+
+    res.json({
+      message: "Payment successful",
+      transaction: transaction.toObject(),
+    });
+  } catch (error) {
+    console.error("Error processing payment:", error);
+    res.status(500).json({ error: "Error processing payment" });
+  }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: "Something went wrong!" });
+});
+
+// Start the server
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.info("SIGTERM signal received.");
+  console.log("Closing HTTP server.");
+  server.close(() => {
+    console.log("HTTP server closed.");
+    mongoose.connection.close(false, () => {
+      console.log("MongoDB connection closed.");
+      process.exit(0);
+    });
+  });
+});
