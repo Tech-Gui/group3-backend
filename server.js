@@ -388,7 +388,7 @@ app.post("/merchant/generate-payment-link", verifyToken, async (req, res) => {
     await pendingPayment.save();
 
     const paymentLink = `${
-      process.env.FRONTEND_URL || "http://localhost:3000"
+      process.env.FRONTEND_URL || "https://digital-wallet-2n2a.vercel.app/"
     }/pay/${paymentId}`;
     const qrCode = await qrcode.toDataURL(paymentLink);
 
@@ -461,8 +461,8 @@ app.post("/process-payment/:paymentId", async (req, res) => {
     if (!validPassword)
       return res.status(401).json({ error: "Invalid password" });
 
-    if (student.balance < pendingPayment.amount)
-      return res.status(400).json({ error: "Insufficient funds" });
+    // if (student.balance < pendingPayment.amount)
+    //   return res.status(400).json({ error: "Insufficient funds" });
 
     const merchant = await Merchant.findOne({
       merchantId: pendingPayment.merchantId,
